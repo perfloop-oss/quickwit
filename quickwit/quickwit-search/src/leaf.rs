@@ -300,7 +300,6 @@ async fn run_cancellable(
 ///
 /// Returns whether the query is provably empty in this split (i.e. `on_absent` fired and
 /// warmup was short-circuited).
-#[instrument(skip_all)]
 pub(crate) async fn warmup(
     searcher: &Searcher,
     warmup_info: &WarmupInfo,
@@ -779,7 +778,27 @@ async fn leaf_search_single_split(
                 HitSet::empty(),
             );
         };
-        warmup(&searcher, &warmup_info, &record_absence).await?
+        // `warmup_mb` is the total warmed into the byte-range cache; `downloaded_mb` is
+        // the subset actually fetched from object storage (cache hits excluded). Both are
+        // recorded after warmup, before the search adds to either.
+        const BYTES_PER_MB: f64 = 1_000_000.0;
+        let warmup_span = info_span!(
+            "warmup",
+            warmup_mb = tracing::field::Empty,
+            downloaded_mb = tracing::field::Empty
+        );
+        let provably_empty = warmup(&searcher, &warmup_info, &record_absence)
+            .instrument(warmup_span.clone())
+            .await?;
+        warmup_span.record(
+            "warmup_mb",
+            byte_range_cache.get_num_bytes() as f64 / BYTES_PER_MB,
+        );
+        warmup_span.record(
+            "downloaded_mb",
+            download_counters.snapshot().0 as f64 / BYTES_PER_MB,
+        );
+        provably_empty
     };
     let warmup_end = Instant::now();
     let warmup_duration: Duration = warmup_end.duration_since(warmup_start);
